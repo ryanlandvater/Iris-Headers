@@ -40,8 +40,10 @@ namespace Iris {
 
 MemoryArenaCore::MemoryArenaCore(std::uint8_t* base, std::size_t capacity,
                                  std::string name, void* file_handle,
-                                 void* map_handle, int fd) noexcept
-    : m_name(std::move(name)), m_capacity(capacity), m_base(base)
+                                 void* map_handle, int fd,
+                                 bool read_only) noexcept
+    : m_name(std::move(name)), m_capacity(capacity), m_base(base),
+      m_read_only(read_only)
 #ifdef _WIN32
     , m_file_handle(file_handle), m_map_handle(map_handle)
 #else
@@ -96,6 +98,9 @@ void MemoryArenaCore::truncate_file(std::size_t size)
 {
     // Anonymous arenas have no file, and a closed one has no handle: both are
     // a no-op rather than an error, so a caller need not track which it holds.
+    // Read-only cores are the third case: the descriptor was opened without
+    // write permission, so truncation cannot succeed and must not be tried.
+    if (m_read_only) return;
 #ifdef _WIN32
     if (!m_file_handle) return;
     HANDLE hFile = static_cast<HANDLE>(m_file_handle);
@@ -222,6 +227,76 @@ MemoryArena MemoryArena::create_from_file(const std::filesystem::path& path,
     }
     return MemoryArena(std::make_shared<MemoryArenaCore>(
         base, capacity, path_str, nullptr, nullptr, fd));
+#endif
+}
+
+MemoryArena MemoryArena::create_from_file_read_only(const std::filesystem::path& path)
+{
+    const std::string path_str = path.string();
+
+#ifdef _WIN32
+    HANDLE hFile = CreateFileA(path_str.c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        throw std::system_error(GetLastError(), std::system_category(),
+                                "Iris::MemoryArena Win32 CreateFileA (read-only) failed");
+
+    LARGE_INTEGER file_size;
+    if (!GetFileSizeEx(hFile, &file_size)) {
+        CloseHandle(hFile);
+        throw std::system_error(GetLastError(), std::system_category(),
+                                "Iris::MemoryArena Win32 GetFileSizeEx failed");
+    }
+    const std::uint64_t total = static_cast<std::uint64_t>(file_size.QuadPart);
+
+    // No FSCTL_SET_SPARSE here: this mapping never writes, so there is
+    // nothing to keep sparse.
+    HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY,
+                                     static_cast<DWORD>(total >> 32),
+                                     static_cast<DWORD>(total & 0xFFFFFFFFu),
+                                     NULL);
+    if (!hMap) {
+        CloseHandle(hFile);
+        throw std::system_error(GetLastError(), std::system_category(),
+                                "Iris::MemoryArena Win32 CreateFileMappingA (read-only) failed");
+    }
+    std::uint8_t* base = static_cast<std::uint8_t*>(
+        MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, total));
+    if (!base) {
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        throw std::system_error(GetLastError(), std::system_category(),
+                                "Iris::MemoryArena Win32 MapViewOfFile (read-only) failed");
+    }
+    return MemoryArena(std::make_shared<MemoryArenaCore>(
+        base, static_cast<std::size_t>(total), path_str,
+        static_cast<void*>(hFile), static_cast<void*>(hMap), -1, true));
+#else
+    int fd = ::open(path_str.c_str(), O_RDONLY);
+    if (fd < 0)
+        throw std::system_error(errno, std::system_category(),
+                                "Iris::MemoryArena POSIX open (read-only) failed");
+
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) {
+        ::close(fd);
+        throw std::system_error(errno, std::system_category(),
+                                "Iris::MemoryArena POSIX fstat failed");
+    }
+    // No ftruncate: the mapped length is the file's own size, and the
+    // descriptor was opened read-only.
+    std::uint8_t* base = static_cast<std::uint8_t*>(
+        mmap(nullptr, static_cast<std::size_t>(st.st_size), PROT_READ,
+             MAP_SHARED, fd, 0));
+    if (base == MAP_FAILED) {
+        ::close(fd);
+        throw std::system_error(errno, std::system_category(),
+                                "Iris::MemoryArena POSIX mmap (read-only) failed");
+    }
+    return MemoryArena(std::make_shared<MemoryArenaCore>(
+        base, static_cast<std::size_t>(st.st_size), path_str,
+        nullptr, nullptr, fd, true));
 #endif
 }
 

@@ -53,9 +53,11 @@ namespace Iris {
 class MemoryArenaCore {
 public:
     /// Uniform across platforms; the unused handle is simply ignored. Called
-    /// only by the factories on MemoryArena.
+    /// only by the factories on MemoryArena. @p read_only marks a mapping whose
+    /// file was opened without write permission (truncate_file no-ops on it).
     MemoryArenaCore(std::uint8_t* base, std::size_t capacity, std::string name,
-                    void* file_handle, void* map_handle, int fd) noexcept;
+                    void* file_handle, void* map_handle, int fd,
+                    bool read_only = false) noexcept;
 
     ~MemoryArenaCore() noexcept;
 
@@ -76,6 +78,7 @@ private:
     std::string   m_name;
     std::size_t   m_capacity = 0;
     std::uint8_t* m_base     = nullptr;
+    bool          m_read_only = false;   // opened O_RDONLY: no truncation
 #ifdef _WIN32
     void* m_file_handle = nullptr;   // CreateFileA handle (file-backed only)
     void* m_map_handle  = nullptr;   // CreateFileMapping handle
@@ -123,6 +126,29 @@ public:
     static MemoryArena create_from_file(
         const std::filesystem::path& path,
         std::size_t capacity = 4ull * 1024 * 1024 * 1024);
+
+    /**
+     * @brief File-backed READ-ONLY mapping of an existing file.
+     *
+     * The complement of `create_from_file` for consumers that only inspect:
+     * opens the file read-only (O_RDONLY / GENERIC_READ), maps PROT_READ /
+     * FILE_MAP_READ, and never extends the file or marks it sparse — the
+     * mapped length is the file's own size. A slide inspector can hand the
+     * result to IFE's validation and abstraction entry points without ever
+     * opening the slide for writing: a read-only file on disk, or a slide a
+     * scanner is still writing, maps exactly as well as a writable one.
+     *
+     * `truncate_file` is a no-op on this core, matching the anonymous-arena
+     * contract: there is nothing this mapping may grow or shrink.
+     *
+     * An empty file cannot be mapped (both platforms reject a zero-length
+     * range) and is not a slide anyway; the call throws std::system_error.
+     *
+     * @param path Existing file to map.
+     * @throws std::system_error if the file cannot be opened or mapped.
+     */
+    static MemoryArena create_from_file_read_only(
+        const std::filesystem::path& path);
 
     /// True when this handle refers to a live mapping.
     [[nodiscard]] explicit operator bool() const noexcept {
