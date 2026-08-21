@@ -21,6 +21,8 @@
 #include "IrisMemory.hpp"
 
 #include <cerrno>
+#include <exception>
+#include <string>
 #include <system_error>
 
 #ifdef _WIN32
@@ -121,7 +123,14 @@ void MemoryArenaCore::truncate_file(std::size_t size)
     // error about the file size with nothing pointing back at the truncation.
 }
 
-MemoryArena MemoryArena::create(std::size_t capacity)
+// The three mapping recipes below stay separate functions rather than one
+// branchy body: they are three different OS call sequences, not three
+// argument sets, and each still throws so the errno / GetLastError value
+// survives to the boundary in create_memory_arena. They are internal —
+// create_memory_arena is the only way in from outside this file.
+namespace {
+
+MemoryArena create_anonymous(std::size_t capacity)
 {
 #ifdef _WIN32
     const std::uint64_t total = static_cast<std::uint64_t>(capacity);
@@ -153,8 +162,8 @@ MemoryArena MemoryArena::create(std::size_t capacity)
 #endif
 }
 
-MemoryArena MemoryArena::create_from_file(const std::filesystem::path& path,
-                                          std::size_t capacity)
+MemoryArena create_file_backed(const std::filesystem::path& path,
+                               std::size_t capacity)
 {
     const std::string path_str = path.string();
 
@@ -230,7 +239,7 @@ MemoryArena MemoryArena::create_from_file(const std::filesystem::path& path,
 #endif
 }
 
-MemoryArena MemoryArena::create_from_file_read_only(const std::filesystem::path& path)
+MemoryArena create_file_read_only(const std::filesystem::path& path)
 {
     const std::string path_str = path.string();
 
@@ -298,6 +307,52 @@ MemoryArena MemoryArena::create_from_file_read_only(const std::filesystem::path&
         base, static_cast<std::size_t>(st.st_size), path_str,
         nullptr, nullptr, fd, true));
 #endif
+}
+
+}  // namespace
+
+Result create_memory_arena(const MemoryArenaCreateInfo& info,
+                           MemoryArena& out_arena) noexcept
+{
+    // Emptied before anything can fail, including the argument checks below:
+    // "empty on failure" has to hold on *every* return, or a caller reusing a
+    // handle keeps the mapping it thinks was just replaced. (FF_CreateMemory
+    // clears after its argument checks and so does not hold this for them.)
+    out_arena = MemoryArena{};
+
+    // Contradictions are rejected before any OS call, so the caller gets the
+    // mistake rather than whatever errno the kernel produces from it.
+    if (info.read_only && info.filepath.empty())
+        return {IRIS_FAILURE,
+                "create_memory_arena: read_only needs a filepath; there is no "
+                "read-only form of an anonymous arena"};
+    if (!info.read_only && info.capacity == 0)
+        return {IRIS_FAILURE,
+                "create_memory_arena: capacity is zero; both platforms reject a "
+                "zero-length mapping"};
+
+    // The catch-all is the point of the boundary -- "nothing throws past
+    // create_memory_arena" is the contract this header now publishes, and a
+    // mapping failure that escaped it would cross into C consumers and the
+    // Python and WASM bindings, which cannot catch anything.
+    try {
+        if (info.filepath.empty())
+            out_arena = create_anonymous(info.capacity);
+        else if (info.read_only)
+            out_arena = create_file_read_only(info.filepath);
+        else
+            out_arena = create_file_backed(info.filepath, info.capacity);
+        return IRIS_SUCCESS;
+    } catch (const std::system_error& e) {
+        // Carries the OS code as well as the text; losing it would make a
+        // permission error and a missing directory read identically.
+        return {IRIS_FAILURE, std::string("create_memory_arena: ") + e.what() +
+                              " (code " + std::to_string(e.code().value()) + ")"};
+    } catch (const std::exception& e) {
+        return {IRIS_FAILURE, std::string("create_memory_arena: ") + e.what()};
+    } catch (...) {
+        return {IRIS_FAILURE, "create_memory_arena: unknown non-std exception"};
+    }
 }
 
 }  // namespace Iris

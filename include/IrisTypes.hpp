@@ -116,8 +116,16 @@ enum IRIS_EXPORT ResultFlag : uint32_t {
 /**
  * @brief Result flags returned by Iris as part of API calls.
  *
- * 
+ * ResultFlag is a bit field, not an enumeration of states: failures occupy the
+ * low half (masked by IRIS_FAILURE) and warnings the high half (IRIS_WARNING),
+ * so severity is a mask test rather than an equality against IRIS_SUCCESS.
+ * RESULT_MAX_ENUM — the default — carries failure bits, so a Result nobody
+ * assigned fails safe.
  *
+ * Severity buckets follow FastFHIR's FF_Result (FF_Primitives.hpp), which took
+ * this shape from here: **a warning is success-like**. `operator bool` is true
+ * for it so a caller may ignore it, while `is_warning()`, `flag` and `message`
+ * keep it visible to one that does not. Only a failure is false.
  */
 struct IRIS_EXPORT Result {
     ResultFlag              flag = RESULT_MAX_ENUM;
@@ -126,10 +134,21 @@ struct IRIS_EXPORT Result {
     Result                  (const ResultFlag& __f) : flag(__f) {}
     Result                  (const ResultFlag& __f, const std::string& __s) :
                             flag (__f), message(__s){}
-    operator bool           () {return flag == IRIS_SUCCESS;}
+
+    /// True for success AND warnings — a warning is ignorable by design.
+    bool succeeded          () const noexcept {return !(flag & IRIS_FAILURE);}
+    /// True only for failures: the go/no-go check for a caller that must stop.
+    bool failed             () const noexcept {return !succeeded();}
+    /// True only for warnings; `message` carries the detail.
+    bool is_warning         () const noexcept {return succeeded() && (flag & IRIS_WARNING);}
+
+    // const, so a `const Result&` converts — the whole ecosystem was working
+    // around its absence (IrisCodecPython's _success compares against the flag
+    // because `if (result)` would not compile on its const reference).
+    operator bool           () const noexcept {return succeeded();}
     Result& operator =      (const ResultFlag __f) {flag = __f; return *this;}
-    bool operator    ==     (const bool& __b) const {return (bool)flag == __b?IRIS_SUCCESS:IRIS_FAILURE;}
-    bool operator    !=     (const bool& __b) const {return (bool)flag != __b?IRIS_SUCCESS:IRIS_FAILURE;}
+    bool operator    ==     (const bool& __b) const {return succeeded() == __b;}
+    bool operator    !=     (const bool& __b) const {return succeeded() != __b;}
     bool operator    &      (const ResultFlag __f)  const  {return flag & __f;}
     bool operator    ==     (const ResultFlag& __f) const  {return flag == __f;}
     bool operator    !=     (const ResultFlag& __f) const  {return flag != __f;}
