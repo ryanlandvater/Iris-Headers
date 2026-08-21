@@ -24,14 +24,20 @@
  * HANDLE and a descriptor type, which is what lets this header stay clean.
  */
 
-#ifndef IrisMemory_hpp
-#define IrisMemory_hpp
+#ifndef IRIS_MEMORY_HPP
+#define IRIS_MEMORY_HPP
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
+
+// The only Iris header this pulls in, and it is here for Result: arena
+// creation reports through the ecosystem's error type rather than throwing
+// across the boundary. IrisTypes.hpp brings no OS headers, so the "no
+// windows.h in a consumer's translation unit" property above is unaffected.
+#include "IrisTypes.hpp"
 
 namespace Iris {
 
@@ -99,57 +105,6 @@ public:
     explicit MemoryArena(std::shared_ptr<MemoryArenaCore> core) noexcept
         : m_core(std::move(core)) {}
 
-    /**
-     * @brief Anonymous read/write mapping (no backing file).
-     * @param capacity Reserved address range; pages materialise on touch.
-     * @throws std::system_error if the mapping cannot be created.
-     */
-    static MemoryArena create(std::size_t capacity = 4ull * 1024 * 1024 * 1024);
-
-    /**
-     * @brief File-backed read/write mapping, sparse on both platforms.
-     *
-     * POSIX: `open` + `ftruncate` (grow-only, preserves existing content) +
-     * `mmap(MAP_SHARED)`. NTFS: `CreateFileA` + `FSCTL_SET_SPARSE` before
-     * mapping, so a multi-GiB arena costs only the pages actually written
-     * rather than zeros on disk.
-     *
-     * \note Existing content is preserved. A caller that needs a clean arena
-     * must truncate or remove the file first.
-     *
-     * @param path Backing file; created if absent.
-     * @param capacity Reserved address range; the file is extended to this
-     *        size but only written pages occupy disk.
-     * @throws std::system_error if the file cannot be opened, marked sparse,
-     *         extended or mapped.
-     */
-    static MemoryArena create_from_file(
-        const std::filesystem::path& path,
-        std::size_t capacity = 4ull * 1024 * 1024 * 1024);
-
-    /**
-     * @brief File-backed READ-ONLY mapping of an existing file.
-     *
-     * The complement of `create_from_file` for consumers that only inspect:
-     * opens the file read-only (O_RDONLY / GENERIC_READ), maps PROT_READ /
-     * FILE_MAP_READ, and never extends the file or marks it sparse — the
-     * mapped length is the file's own size. A slide inspector can hand the
-     * result to IFE's validation and abstraction entry points without ever
-     * opening the slide for writing: a read-only file on disk, or a slide a
-     * scanner is still writing, maps exactly as well as a writable one.
-     *
-     * `truncate_file` is a no-op on this core, matching the anonymous-arena
-     * contract: there is nothing this mapping may grow or shrink.
-     *
-     * An empty file cannot be mapped (both platforms reject a zero-length
-     * range) and is not a slide anyway; the call throws std::system_error.
-     *
-     * @param path Existing file to map.
-     * @throws std::system_error if the file cannot be opened or mapped.
-     */
-    static MemoryArena create_from_file_read_only(
-        const std::filesystem::path& path);
-
     /// True when this handle refers to a live mapping.
     [[nodiscard]] explicit operator bool() const noexcept {
         return m_core != nullptr;
@@ -173,9 +128,9 @@ public:
     /**
      * @brief Truncate the backing file to @p size bytes. No-op when anonymous.
      *
-     * `create_from_file` extends the file to `capacity`, so a caller that maps
-     * a large arena and writes less must call this or ship a file whose length
-     * is the arena's rather than the payload's. That is not cosmetic for Iris:
+     * A writable file-backed arena extends the file to `capacity`, so a caller
+     * that maps a large arena and writes less must call this or ship a file
+     * whose length is the arena's rather than the payload's. Not cosmetic:
      * an IFE slide records its own length in `FILE_HEADER.FILE_SIZE`, and
      * `validate_file_structure` compares it against the size the OS reports —
      * an untruncated arena-written slide fails its own validation.
@@ -211,6 +166,58 @@ private:
     std::shared_ptr<MemoryArenaCore> m_core;
 };
 
+/**
+ * @brief Parameters for creating a virtual memory arena.
+ *
+ * One struct rather than a factory per combination, so a new option — a huge
+ * page hint, a commit policy — is a field here instead of a fourth entry
+ * point. `filepath` empty selects an anonymous arena, the way FastFHIR's
+ * FF_MemoryCreateInfo uses a null pointer for the same choice; this takes a
+ * path rather than a `const char*` because the arena is a C++ surface and the
+ * Windows implementation needs the wide string a `path` can still give it.
+ */
+struct MemoryArenaCreateInfo {
+    /// Reserved address range. Pages materialise on touch, so this is a
+    /// reservation and not an allocation; on a writable file-backed arena the
+    /// file is extended to it, but only written pages occupy disk. Ignored
+    /// when `read_only` (the mapped length is the file's own size).
+    std::size_t           capacity  = 4ull * 1024 * 1024 * 1024;
+
+    /// Backing file, created if absent. Empty selects an anonymous arena.
+    /// Existing content is preserved — a caller needing a clean arena must
+    /// truncate or remove the file first.
+    std::filesystem::path filepath  = {};
+
+    /// Map an existing file without writing to it: opened O_RDONLY /
+    /// GENERIC_READ and mapped PROT_READ / FILE_MAP_READ, never extended and
+    /// never marked sparse, so `truncate_file` no-ops as it does on an
+    /// anonymous arena. This is what lets an inspector hand a slide to IFE's
+    /// validation and abstraction entry points without opening it for
+    /// writing — a read-only file, or one a scanner is still writing, maps
+    /// exactly as well as a writable one. Requires `filepath`.
+    bool                  read_only = false;
+};
+
+/**
+ * @brief Create a virtual memory arena. @p out_arena is empty on failure.
+ *
+ * The error boundary for this header: every failure below — a file that
+ * cannot be opened, marked sparse, extended or mapped — arrives as a Result
+ * carrying the OS diagnostic, and nothing throws past this point. The
+ * implementation still raises `std::system_error` internally, because that is
+ * where the errno and GetLastError values are; this converts them.
+ *
+ * Writable file-backed arenas are sparse on both platforms: POSIX `open` +
+ * `ftruncate` (grow-only) + `mmap(MAP_SHARED)`, NTFS `CreateFile` +
+ * `FSCTL_SET_SPARSE` before mapping, so a multi-GiB arena costs only the pages
+ * actually written rather than zeros on disk.
+ *
+ * An empty file cannot be mapped — both platforms reject a zero-length range —
+ * and is not a slide anyway, so a read-only create over one fails.
+ */
+Result create_memory_arena(const MemoryArenaCreateInfo& info,
+                           MemoryArena& out_arena) noexcept;
+
 }  // namespace Iris
 
-#endif  // IrisMemory_hpp
+#endif  // IRIS_MEMORY_HPP
