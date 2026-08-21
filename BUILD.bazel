@@ -40,12 +40,17 @@ cc_library(
     deps = [":iris_headers"],
 )
 
-# IrisMemory.cpp never includes IrisTypes.hpp (its header is stdlib-only), so
-# it needs no IRIS_EXPORT_API define — the macro never appears in its TUs.
+# create_memory_arena returns and constructs Iris::Result, whose methods are
+# declared IRIS_EXPORT in IrisTypes.hpp — so, like the other src/*.cpp
+# targets, the defining TU must compile on the "building the library" side of
+# the macro (dllexport on MSVC). Without it, MSVC treats every Result
+# construction as dllimport and the link fails (IFE's Windows Bazel CI hit
+# exactly this: LNK2019 on __imp_??0Result).
 cc_library(
     name = "iris_memory",
     srcs = ["src/IrisMemory.cpp"],
     copts = _COPTS,
+    local_defines = ["IRIS_EXPORT_API=true"],
     deps = [":iris_headers"],
 )
 
