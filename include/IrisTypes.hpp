@@ -34,6 +34,15 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+// windows.h declares `min` and `max` as macros unless NOMINMAX is set first,
+// and this header is pulled into nearly every translation unit in the
+// ecosystem. Left unguarded, the macros rewrite std::min / std::max / any
+// std::numeric_limits<T>::max() into a bare `::(` and fail the build (MSVC
+// C2589/C2059). Define it here, once, before the include; a consumer that has
+// already asked for it keeps its own definition.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #endif
 
