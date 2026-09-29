@@ -44,7 +44,7 @@ namespace Iris {
 /**
  * @brief Shared core of one OS memory mapping.
  *
- * Owned through `MemoryArena`'s shared_ptr: multiple handles, one mapping.
+ * Owned through `Memory`'s shared_ptr: multiple handles, one mapping.
  * The mapping is demand-paged — an anonymous arena costs nothing until
  * touched, and a sparse file-backed arena costs only the pages actually
  * written. Unmaps and closes its handles when the last handle dies, or
@@ -56,25 +56,28 @@ namespace Iris {
  * portable windowed/remote path should not use this on wasm — see
  * IFE_Window's Emscripten branch for ranged fetch.
  */
-class MemoryArenaCore {
+class MemoryCore {
 public:
     /// Uniform across platforms; the unused handle is simply ignored. Called
-    /// only by the factories on MemoryArena. @p read_only marks a mapping whose
+    /// only by the factories on Memory. @p read_only marks a mapping whose
     /// file was opened without write permission (truncate_file no-ops on it).
-    MemoryArenaCore(std::uint8_t* base, std::size_t capacity, std::string name,
+    MemoryCore(std::uint8_t* base, std::size_t capacity, std::string name,
                     void* file_handle, void* map_handle, int fd,
                     bool read_only = false) noexcept;
 
-    ~MemoryArenaCore() noexcept;
+    ~MemoryCore() noexcept;
 
-    MemoryArenaCore(const MemoryArenaCore&)            = delete;
-    MemoryArenaCore& operator=(const MemoryArenaCore&) = delete;
+    MemoryCore(const MemoryCore&)            = delete;
+    MemoryCore& operator=(const MemoryCore&) = delete;
 
     /// Unmap and release the OS handles. Idempotent; the destructor calls it.
     void close() noexcept;
 
     /// Shrink (or grow) the backing file. No-op when anonymous or closed.
     void truncate_file(std::size_t size);
+
+    /// Make [offset, offset + size) touchable. See Memory::commit.
+    void commit(std::size_t offset, std::size_t size);
 
     [[nodiscard]] std::uint8_t*      base()     const noexcept { return m_base; }
     [[nodiscard]] std::size_t        capacity() const noexcept { return m_capacity; }
@@ -99,10 +102,10 @@ private:
  * Mirrors FastFHIR's FF_Memory handle/body split: copying a handle shares the
  * same underlying mapping rather than duplicating it.
  */
-class MemoryArena {
+class Memory {
 public:
-    MemoryArena() = default;
-    explicit MemoryArena(std::shared_ptr<MemoryArenaCore> core) noexcept
+    Memory() = default;
+    explicit Memory(std::shared_ptr<MemoryCore> core) noexcept
         : m_core(std::move(core)) {}
 
     /// True when this handle refers to a live mapping.
@@ -140,6 +143,12 @@ public:
      * Call it once writing is finished, with the payload size, and do not
      * write through `base()` afterwards.
      *
+     * \warning **Windows refuses this while the file is mapped**:
+     * `SetEndOfFile` fails on a file with a mapped view. A writer finishing a
+     * file should instead `close()` the arena and then resize the file by
+     * path (`std::filesystem::resize_file`) — one order that works on every
+     * platform, and leaves the file closed for whoever moves it next.
+     *
      * @throws std::system_error if the truncation fails.
      */
     void truncate_file(std::size_t size) const {
@@ -152,7 +161,7 @@ public:
      *
      * On Windows a file-backed mapping holds the backing file open for the
      * mapping's lifetime, so the file cannot be deleted or its directory
-     * removed until every handle is gone. Dropping a `MemoryArena` only
+     * removed until every handle is gone. Dropping a `Memory` only
      * unmaps when it happens to hold the final reference; this always does.
      *
      * `base()` returns nullptr afterwards. The handle still tests true — it
@@ -162,8 +171,29 @@ public:
         if (m_core) m_core->close();
     }
 
+    /**
+     * @brief Make [@p offset, @p offset + @p size) touchable before first use.
+     *
+     * An arena is a reservation, not an allocation: nothing is committed until
+     * it is needed, which is what lets a caller reserve far more than it will
+     * ever write. POSIX and every file-backed arena commit a page on first
+     * touch by themselves, so this is a no-op there. A Windows ANONYMOUS arena
+     * cannot: its pagefile-backed section is created `SEC_RESERVE` (otherwise
+     * the whole reservation is charged to the pagefile up front and a huge one
+     * fails), and touching a page that was never committed is an access
+     * violation. Call this for every range before writing it — a bump
+     * allocator calls it from its claim. Committing an already-committed page
+     * is harmless, so concurrent claims that share a page need no coordination.
+     *
+     * @throws std::out_of_range if the range leaves the arena;
+     *         std::system_error if the commit fails.
+     */
+    void commit(std::size_t offset, std::size_t size) const {
+        if (m_core) m_core->commit(offset, size);
+    }
+
 private:
-    std::shared_ptr<MemoryArenaCore> m_core;
+    std::shared_ptr<MemoryCore> m_core;
 };
 
 /**
@@ -176,11 +206,15 @@ private:
  * path rather than a `const char*` because the arena is a C++ surface and the
  * Windows implementation needs the wide string a `path` can still give it.
  */
-struct MemoryArenaCreateInfo {
-    /// Reserved address range. Pages materialise on touch, so this is a
-    /// reservation and not an allocation; on a writable file-backed arena the
-    /// file is extended to it, but only written pages occupy disk. Ignored
-    /// when `read_only` (the mapped length is the file's own size).
+struct MemoryCreateInfo {
+    /// Reserved address range, and never remapped: the base does not move, so
+    /// exhausting it is the caller's terminal error, not a cue to grow. It is a
+    /// reservation, not an allocation — anonymous arenas are mapped
+    /// `MAP_NORESERVE` / `SEC_RESERVE` so even a huge one is not charged against
+    /// memory up front (on Windows, `commit` each range before touching it);
+    /// a writable file-backed arena extends the file to it, sparse, so only
+    /// written pages occupy disk. Ignored when `read_only` (the mapped length
+    /// is the file's own size).
     std::size_t           capacity  = 4ull * 1024 * 1024 * 1024;
 
     /// Backing file, created if absent. Empty selects an anonymous arena.
@@ -215,8 +249,8 @@ struct MemoryArenaCreateInfo {
  * An empty file cannot be mapped — both platforms reject a zero-length range —
  * and is not a slide anyway, so a read-only create over one fails.
  */
-Result create_memory_arena(const MemoryArenaCreateInfo& info,
-                           MemoryArena& out_arena) noexcept;
+Result create_memory(const MemoryCreateInfo& info,
+                           Memory& out_arena) noexcept;
 
 }  // namespace Iris
 

@@ -40,7 +40,7 @@ cc_library(
     deps = [":iris_headers"],
 )
 
-# create_memory_arena returns and constructs Iris::Result, whose methods are
+# create_memory returns and constructs Iris::Result, whose methods are
 # declared IRIS_EXPORT in IrisTypes.hpp — so, like the other src/*.cpp
 # targets, the defining TU must compile on the "building the library" side of
 # the macro (dllexport on MSVC). Without it, MSVC treats every Result
