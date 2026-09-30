@@ -65,6 +65,23 @@ HWY_INLINE void StoreInterleaved4Helper(D d, const Vec<D>& v0, const Vec<D>& v1,
     StoreInterleaved4(v0, v1, v2, v3, d, dst);
 }
 
+// Channel-count generic forms: CH interleaved 8-bit channels <-> one vector
+// per channel (one lane per pixel). v3 is untouched / ignored when CH == 3.
+template<uint8_t CH, typename D>
+HWY_INLINE void LoadPixelsHelper(D d, const uint8_t* HWY_RESTRICT src,
+                                 Vec<D>& v0, Vec<D>& v1, Vec<D>& v2, Vec<D>& v3) {
+    if constexpr (CH == 3) LoadInterleaved3Helper(d, src, v0, v1, v2);
+    else                   LoadInterleaved4Helper(d, src, v0, v1, v2, v3);
+}
+
+template<uint8_t CH, typename D>
+HWY_INLINE void StorePixelsHelper(D d, const Vec<D>& v0, const Vec<D>& v1,
+                                  const Vec<D>& v2, const Vec<D>& v3,
+                                  uint8_t* HWY_RESTRICT dst) {
+    if constexpr (CH == 3) StoreInterleaved3Helper(d, v0, v1, v2, dst);
+    else                   StoreInterleaved4Helper(d, v0, v1, v2, v3, dst);
+}
+
 HWY_API void EXPAND_TILE_ADD_ALPHA_8bit (const uint8_t* src, uint8_t* dst)
 {
     // This is done BACKWARDS so that it is safe
@@ -139,51 +156,51 @@ HWY_API void DOWNSAMPLE_INTO_TILE_2X_AVG(const uint8_t* HWY_RESTRICT src,
     const uint8_t o_x = s_x << 7;   // sub-y region [0,1] * 128 pixels
     constexpr auto stride = TILE_PIX_LENGTH * CH;
     
-    const ScalableTag<uint16_t> d16;
-    const FixedTag<uint8_t, d16.MaxLanes()> d8;
-    const size_t N = Lanes(d16);
+    // Channels are de-interleaved on load so each u8 lane is one source pixel;
+    // SumsOf2 then adds each horizontal pixel pair into one u16 lane. Every N
+    // source pixels of a row therefore produce N/2 destination pixels (d8_dst).
+    const ScalableTag<uint8_t> d8;
+    const RepartitionToWide<decltype(d8)> d16;
+    const Rebind<uint8_t, decltype(d16)> d8_dst;
+    const size_t N = Lanes(d8);
+    // Vectors must hold whole pixel pairs; only HWY_SCALAR (1 lane) does not,
+    // and there the scalar loop below does all of the work.
+    const bool simd = N % 2 == 0;
     
-    const auto twos = Set(d16, 2);
-    
-    // Aligned buffers for both input and output
-    alignas(32) uint8_t aligned_src[2 * N];
-    alignas(32) uint8_t aligned_dst[N];
+    const auto round = Set(d16, 2);         // Round by adding 2 (then divide by 4)
     
     for (auto y = 0; y < 128; ++y) {
         const auto row0 = src + (2 * y) * stride;
         const auto row1 = src + (2 * y + 1) * stride;
         auto orow = dst + (y + o_y) * stride + o_x * CH;
         
-        size_t x = 0;
-        for (; x * N < 128 * CH - N; x += N) {
-            // Copy first row data to aligned buffer
-            memcpy(aligned_src, row0 + 2 * x, N);
-            memcpy(aligned_src + N, row0 + 2 * x + CH, N);
-            
-            // Load and sum first row
-            auto sum = PromoteTo(d16, Load(d8, aligned_src));
-            sum += PromoteTo(d16, Load(d8, aligned_src + N));
-            
-            // Copy second row data
-            memcpy(aligned_src, row1 + 2 * x, N);
-            memcpy(aligned_src + N, row1 + 2 * x + CH, N);
-            
-            // Add second row
-            sum += PromoteTo(d16, Load(d8, aligned_src));
-            sum += PromoteTo(d16, Load(d8, aligned_src + N));
-            
-            // Average and store
-            Store(DemoteTo(d8, (sum + twos) >> twos), d8, aligned_dst);
-            memcpy(orow + x, aligned_dst, N);
+        size_t x = 0;   // Source pixel column
+        for (; simd && x + N <= TILE_PIX_LENGTH; x += N) {
+            // Per-channel sums of each 2x2 block (one u16 lane per destination pixel)
+            auto s0 = Zero(d16), s1 = Zero(d16), s2 = Zero(d16), s3 = Zero(d16);
+            for (const auto row : {row0, row1}) {
+                Vec<decltype(d8)> c0, c1, c2, c3;
+                LoadPixelsHelper<CH>(d8, row + x * CH, c0, c1, c2, c3);
+                s0 = Add(s0, SumsOf2(c0));
+                s1 = Add(s1, SumsOf2(c1));
+                s2 = Add(s2, SumsOf2(c2));
+                if constexpr (CH == 4) s3 = Add(s3, SumsOf2(c3));
+            }
+            StorePixelsHelper<CH>(d8_dst,
+                                  DemoteTo(d8_dst, ShiftRight<2>(Add(s0, round))),
+                                  DemoteTo(d8_dst, ShiftRight<2>(Add(s1, round))),
+                                  DemoteTo(d8_dst, ShiftRight<2>(Add(s2, round))),
+                                  DemoteTo(d8_dst, ShiftRight<2>(Add(s3, round))),
+                                  orow + (x / 2) * CH);
         }
         
-        // Scalar cleanup
-        for (; x < 128 * CH; x += CH) {
+        // Scalar cleanup (remainder of the row when N does not divide it evenly)
+        for (; x < TILE_PIX_LENGTH; x += 2) {
             for (int c = 0; c < CH; ++c) {
                 const uint16_t sum =
-                    row0[2 * x + c] + row0[2 * x + CH + c] +
-                    row1[2 * x + c] + row1[2 * x + CH + c];
-                orow[x + c] = static_cast<uint8_t>((sum + 2) >> 2);
+                    row0[x * CH + c] + row0[(x + 1) * CH + c] +
+                    row1[x * CH + c] + row1[(x + 1) * CH + c];
+                orow[(x / 2) * CH + c] = static_cast<uint8_t>((sum + 2) >> 2);
             }
         }
     }
@@ -213,16 +230,18 @@ inline void DOWNSAMPLE_INTO_TILE_4X_AVG(const uint8_t* HWY_RESTRICT src,
     const uint8_t o_x = s_x << 6;   // sub-y region [0,3] * 64 pixels
     constexpr auto stride = TILE_PIX_LENGTH * CH;
     
-    const ScalableTag<uint16_t> d16;
-    const FixedTag<uint8_t, d16.MaxLanes()> d8;
-    const size_t N = Lanes(d16);
+    // Channels are de-interleaved on load so each u8 lane is one source pixel;
+    // SumsOf4 then adds each horizontal run of 4 pixels into one u32 lane. Every
+    // N source pixels of a row therefore produce N/4 destination pixels (d8_dst).
+    const ScalableTag<uint8_t> d8;
+    const RepartitionToWideX2<decltype(d8)> d32;
+    const Rebind<uint8_t, decltype(d32)> d8_dst;
+    const size_t N = Lanes(d8);
+    // Vectors must hold whole 4-pixel runs; only HWY_SCALAR (1 lane) does not,
+    // and there the scalar loop below does all of the work.
+    const bool simd = N % 4 == 0;
     
-    const auto shift_amount = Set(d16, 4);  // Divide by 16
-    const auto round = Set(d16, 8);         // Round by adding 8
-    
-    // Ensure alignment for SIMD loads/stores
-    alignas(32) uint8_t aligned_src[4 * N];
-    alignas(32) uint8_t aligned_dst[N];
+    const auto round = Set(d32, 8);         // Round by adding 8 (then divide by 16)
     
     for (auto y = 0; y < 64; ++y) {
         const auto row0 = src + (4 * y) * stride;
@@ -231,69 +250,34 @@ inline void DOWNSAMPLE_INTO_TILE_4X_AVG(const uint8_t* HWY_RESTRICT src,
         const auto row3 = src + (4 * y + 3) * stride;
         auto orow = dst + (y + o_y) * stride + o_x * CH;
         
-        size_t x = 0;
-        for (; x * N < 64 * CH - N; x += N) {
-            // Copy source data to aligned buffer
-            memcpy(aligned_src, row0 + 4 * x, N);
-            memcpy(aligned_src + N, row0 + 4 * x + CH, N);
-            memcpy(aligned_src + 2 * N, row0 + 4 * x + 2 * CH, N);
-            memcpy(aligned_src + 3 * N, row0 + 4 * x + 3 * CH, N);
-            
-            // Load all 16 pixels (4x4 grid)
-            auto sum = PromoteTo(d16, Load(d8, aligned_src + 4 * x));
-            sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + CH));
-            sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 2 * CH));
-            sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 3 * CH));
-            
-            // Repeat for other rows...
-            memcpy(aligned_src, row1 + 4 * x, N);
-            memcpy(aligned_src + N, row1 + 4 * x + CH, N);
-            memcpy(aligned_src + 2 * N, row1 + 4 * x + 2 * CH, N);
-            memcpy(aligned_src + 3 * N, row1 + 4 * x + 3 * CH, N);
-            
-            auto row1_sum = PromoteTo(d16, Load(d8, aligned_src + 4 * x));
-            row1_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + CH));
-            row1_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 2 * CH));
-            row1_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 3 * CH));
-            sum += row1_sum;
-            
-            memcpy(aligned_src, row2 + 4 * x, N);
-            memcpy(aligned_src + N, row2 + 4 * x + CH, N);
-            memcpy(aligned_src + 2 * N, row2 + 4 * x + 2 * CH, N);
-            memcpy(aligned_src + 3 * N, row2 + 4 * x + 3 * CH, N);
-            
-            auto row2_sum = PromoteTo(d16, Load(d8, aligned_src + 4 * x));
-            row2_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + CH));
-            row2_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 2 * CH));
-            row2_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 3 * CH));
-            sum += row2_sum;
-            
-            memcpy(aligned_src, row3 + 4 * x, N);
-            memcpy(aligned_src + N, row3 + 4 * x + CH, N);
-            memcpy(aligned_src + 2 * N, row3 + 4 * x + 2 * CH, N);
-            memcpy(aligned_src + 3 * N, row3 + 4 * x + 3 * CH, N);
-            memcpy(aligned_src + 3 * N, row3 + 4 * x + 3 * CH, N);
-            
-            auto row3_sum = PromoteTo(d16, Load(d8, aligned_src + 4 * x));
-            row3_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + CH));
-            row3_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 2 * CH));
-            row3_sum += PromoteTo(d16, Load(d8, aligned_src + 4 * x + 3 * CH));
-            sum += row3_sum;
-            
-            // Round and shift
-            Store(DemoteTo(d8, (sum + round) >> shift_amount), d8, aligned_dst);
-            memcpy(orow + x, aligned_dst, N);
+        size_t x = 0;   // Source pixel column
+        for (; simd && x + N <= TILE_PIX_LENGTH; x += N) {
+            // Per-channel sums of each 4x4 block (one u32 lane per destination pixel)
+            auto s0 = Zero(d32), s1 = Zero(d32), s2 = Zero(d32), s3 = Zero(d32);
+            for (const auto row : {row0, row1, row2, row3}) {
+                Vec<decltype(d8)> c0, c1, c2, c3;
+                LoadPixelsHelper<CH>(d8, row + x * CH, c0, c1, c2, c3);
+                s0 = Add(s0, SumsOf4(c0));
+                s1 = Add(s1, SumsOf4(c1));
+                s2 = Add(s2, SumsOf4(c2));
+                if constexpr (CH == 4) s3 = Add(s3, SumsOf4(c3));
+            }
+            StorePixelsHelper<CH>(d8_dst,
+                                  DemoteTo(d8_dst, ShiftRight<4>(Add(s0, round))),
+                                  DemoteTo(d8_dst, ShiftRight<4>(Add(s1, round))),
+                                  DemoteTo(d8_dst, ShiftRight<4>(Add(s2, round))),
+                                  DemoteTo(d8_dst, ShiftRight<4>(Add(s3, round))),
+                                  orow + (x / 4) * CH);
         }
         
-        // Scalar cleanup
-        for (; x < 64 * CH; x += CH) {
+        // Scalar cleanup (remainder of the row when N does not divide it evenly)
+        for (; x < TILE_PIX_LENGTH; x += 4) {
             for (int c = 0; c < CH; ++c) {
-                const uint16_t sum =
-                    row0[4 * x + c] + row0[4 * x + CH + c] + row0[4 * x + 2*CH + c] + row0[4 * x + 3*CH + c] +
-                    row1[4 * x + c] + row1[4 * x + CH + c] + row1[4 * x + 2*CH + c] + row1[4 * x + 3*CH + c] +
-                    row2[4 * x + c] + row2[4 * x + CH + c] + row2[4 * x + 2*CH + c] + row2[4 * x + 3*CH + c] +
-                    row3[4 * x + c] + row3[4 * x + CH + c] + row3[4 * x + 2*CH + c] + row3[4 * x + 3*CH + c];
-                orow[x + c] = static_cast<uint8_t>((sum + 8) >> 4);
+                uint16_t sum = 0;
+                for (const auto row : {row0, row1, row2, row3})
+                    for (size_t k = 0; k < 4; ++k)
+                        sum += row[(x + k) * CH + c];
+                orow[(x / 4) * CH + c] = static_cast<uint8_t>((sum + 8) >> 4);
             }
         }
     }
