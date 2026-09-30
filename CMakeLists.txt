@@ -9,6 +9,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(IRIS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include/)
 set(IRIS_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/)
 Project (IrisHeadersProj LANGUAGES CXX)
+# The pinned third-party versions for every Iris repository (see the file).
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/dependencies.cmake)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
@@ -34,7 +36,7 @@ endif(NOT ${PROJECT_IS_TOP_LEVEL})
 option(IRIS_HEADERS_BUILD_TESTS "Build the Iris-Headers source tests (requires Google Highway)" OFF)
 if (IRIS_HEADERS_BUILD_TESTS)
     enable_testing()
-    find_package(hwy REQUIRED)
+    find_package(hwy ${IRIS_DEP_HWY_MIN} REQUIRED)   # the SIMD kernels need >= the floor
     add_executable(
         IrisSIMDTests
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/IrisSIMDTests.cpp
