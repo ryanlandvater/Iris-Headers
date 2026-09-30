@@ -31,6 +31,22 @@ if(NOT ${PROJECT_IS_TOP_LEVEL})
     
 endif(NOT ${PROJECT_IS_TOP_LEVEL})
 
+option(IRIS_HEADERS_BUILD_TESTS "Build the Iris-Headers source tests (requires Google Highway)" OFF)
+if (IRIS_HEADERS_BUILD_TESTS)
+    enable_testing()
+    find_package(hwy REQUIRED)
+    add_executable(
+        IrisSIMDTests
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/IrisSIMDTests.cpp
+        ${IRIS_SOURCE_DIR}/IrisSIMD.cpp
+        ${IRIS_SOURCE_DIR}/IrisBuffer.cpp
+    )
+    target_include_directories(IrisSIMDTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/priv)
+    target_compile_definitions(IrisSIMDTests PRIVATE IRIS_EXPORT_API=true)
+    target_link_libraries(IrisSIMDTests PRIVATE IrisHeaders hwy::hwy)
+    add_test(NAME IrisSIMDTests COMMAND IrisSIMDTests)
+endif()
+
 if (${PROJECT_IS_TOP_LEVEL})
     install(
         TARGETS IrisHeaders
