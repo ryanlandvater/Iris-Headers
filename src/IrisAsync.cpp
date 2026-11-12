@@ -52,12 +52,14 @@ void __INTERNAL__Pool::issue_task(const LambdaPtr &lambda)
     // Return if the pool is not active / Shutting down
     if (status & POOL_TERMINATING) return WARN_INACTIVE_QUEUE();
     
-    // Insert the task into the list.
+    // Count the task before publishing it: a worker may run it and decrement
+    // _pending before this thread continues, and a decrement that arrives
+    // first is clamped at zero and lost (found 2026-11-12; TypeTests_1.3).
+    _pending++;
     _tasks.push(Callback{
         .callback       = lambda,
         .fenceOptional  = nullptr,
     });
-    _pending++;
     
     // And notify any waiting implementation threads
     _task_added.notify_one();
@@ -70,12 +72,14 @@ Fence __INTERNAL__Pool::issue_task_with_fence(const LambdaPtr &lambda)
     // Create a callback fence
     auto fence = std::make_shared<__INTERNAL__Fence>();
     
-    // Insert the task into the list.
+    // Count the task before publishing it: a worker may run it and decrement
+    // _pending before this thread continues, and a decrement that arrives
+    // first is clamped at zero and lost (found 2026-11-12; TypeTests_1.3).
+    _pending++;
     _tasks.push(Callback{
         .callback       = lambda,
         .fenceOptional  = fence,
     });
-    _pending++;
     
     // And notify any waiting implementation threads
     _task_added.notify_one();
@@ -84,7 +88,9 @@ Fence __INTERNAL__Pool::issue_task_with_fence(const LambdaPtr &lambda)
 }
 void __INTERNAL__Pool::wait_until_complete ()
 {
-    {// Switch the pool to the draining state
+    {// Switch the pool to the draining state under the workers' mutex, so a
+     // worker between its status check and its wait cannot miss the change.
+        MutexLock guard (_task_added_mtx);
         auto STATUS = status.load();
         while(!status.compare_exchange_weak(STATUS, (__status)(STATUS|POOL_DRAINING)));
     }
@@ -96,7 +102,8 @@ void __INTERNAL__Pool::wait_until_complete ()
 }
 void __INTERNAL__Pool::terminate()
 {
-    {   // Switch the pool to the terminated state
+    {   // Switch the pool to the terminated state, under the workers' mutex (see wait_until_complete).
+        MutexLock guard (_task_added_mtx);
         auto STATUS = status.load();
         while(!status.compare_exchange_weak(STATUS, (__status)(STATUS|POOL_TERMINATING)));
     }
@@ -124,29 +131,18 @@ void __INTERNAL__Pool::process_tasks() {
     Iterator<Callback> __it = _tasks.begin();
     MutexLock task_lock     = MutexLock(_task_added_mtx, std::defer_lock);
 
-    while (status == POOL_ACTIVE) {
-        // Wait for a task to be issued.
+    // Run what is queued before deciding whether to stop: a worker that starts
+    // after wait_until_complete switched the pool to draining must still run its
+    // share, or the call returns with tasks unrun (found by CI on Windows,
+    // 2026-11-12; TypeTests_1.3).
+    for (;;) {
         try {
-            task_lock.lock();
-            _task_added.wait_for(task_lock, std::chrono::seconds(1)); // Check every second
-            task_lock.unlock();
-        } catch (...) {
-            if (task_lock.owns_lock())
-                task_lock.unlock();
-            task_lock = MutexLock(_task_added_mtx, std::defer_lock);
-            continue;
-        }
-        
-        // Attempt to implement those tasks.
-        try {
-            while (__it.pop(callback_entry) && (status ^ POOL_TERMINATING)) {
-                // Get the entry at the iterator's location.
-
-                // Invoke the callback method and then release 
+            while (!(status & POOL_TERMINATING) && __it.pop(callback_entry)) {
+                // Invoke the callback method and then release
                 // it's context (to free captured vars).
                 callback_entry.callback();
                 callback_entry.callback = nullptr;
-                
+
                 // If there is a fence, trigger it to release any waiting threads.
                 auto fence = callback_entry.fenceOptional;
                 if (fence) {
@@ -161,8 +157,20 @@ void __INTERNAL__Pool::process_tasks() {
             LOG         << "[WARNING] Exception thrown on Iris Async callback thread: "
                         << error.what() << "\n";
             std::cerr   << LOG.str();
-            
-    
+        }
+        // Draining or terminating, and nothing left to pop: this worker is done.
+        if (status != POOL_ACTIVE)
+            return;
+
+        // Wait for a task to be issued, or for the pool to stop. The status is
+        // rechecked under the mutex before blocking, so a drain is never missed;
+        // a missed task notification is still retried within a second.
+        try {
+            task_lock.lock();
+            _task_added.wait_for(task_lock, std::chrono::seconds(1),
+                                 [this] { return status != POOL_ACTIVE; });
+            task_lock.unlock();
+        } catch (...) {
             if (task_lock.owns_lock())
                 task_lock.unlock();
             task_lock = MutexLock(_task_added_mtx, std::defer_lock);

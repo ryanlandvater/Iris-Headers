@@ -121,6 +121,21 @@ TEST_CASE("Async pool: every issued task runs before wait_until_complete returns
     CHECK(ran.load() == 100);
 }
 
+// Found by CI on Windows (2026-11-12): a worker that had not reached its loop
+// when wait_until_complete switched the pool to draining never ran anything,
+// so the call could return with every task unrun (0 of 100 there). Many short
+// rounds make the race show on any platform.
+TEST_CASE("Async pool: wait_until_complete runs every task even when workers start late", "[Async]") {
+    for (int round = 0; round < 300; ++round) {
+        std::atomic<int> ran{0};
+        const Iris::Async::ThreadPool pool = Iris::Async::createThreadPool(4);
+        for (int task = 0; task < 20; ++task) pool->issue_task([&ran] { ++ran; });
+        pool->wait_until_complete();
+        REQUIRE(ran.load() == 20);
+        REQUIRE(pool->pending_tasks() == 0);
+    }
+}
+
 TEST_CASE("Async pool: a fence signals when its task has run", "[Async]") {
     const Iris::Async::ThreadPool pool = Iris::Async::createThreadPool(2);
     std::atomic<bool> ran{false};
