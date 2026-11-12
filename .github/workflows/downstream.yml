@@ -1,0 +1,112 @@
+# DownstreamBuild_1.2 (development/MODERNIZATION.md, SafetyNet_1).
+#
+# A header change is correct only relative to what consumes it, so this builds
+# the consumers against the change, and again against the base (the control
+# run), on every pull request and every push to main. Verdict per consumer:
+#   change red, base green -> this change broke it: fail
+#   change red, base red   -> the consumer was already broken: warn, pass
+#   change green           -> pass
+# No secret is used here; the downstream repositories' own CI is triggered
+# only when a pull request merges (trigger-downstream.yml).
+name: downstream
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: downstream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  standalone-headers:
+    name: Headers compile alone (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the standalone-header check with Clang
+        run: |
+          cmake -S . -B build -DCMAKE_CXX_COMPILER=clang++ -DIRIS_HEADERS_CHECK_STANDALONE=ON
+          cmake --build build
+
+  consumer:
+    name: ${{ matrix.consumer }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # IFE: self-contained and fast; Windows is where macro collisions bite.
+          - { consumer: Iris-File-Extension, os: ubuntu-24.04,
+              options: "-DIFE_BUILD_TESTS=ON", test: true }
+          - { consumer: Iris-File-Extension, os: macos-15,
+              options: "-DIFE_BUILD_TESTS=ON", test: true }
+          - { consumer: Iris-File-Extension, os: windows-2025,
+              options: "-DIFE_BUILD_TESTS=ON", test: true }
+          # Iris-Codec: decoder only, a build check; the encoder pulls OpenSlide
+          # and the image codecs, which this job does not need.
+          - { consumer: Iris-Codec, os: ubuntu-24.04,
+              options: "-DIRIS_BUILD_ENCODER=OFF -DIRIS_USE_OPENSLIDE=OFF -DIRIS_BUILD_PYTHON=OFF", test: false }
+          - { consumer: Iris-Codec, os: macos-15,
+              options: "-DIRIS_BUILD_ENCODER=OFF -DIRIS_USE_OPENSLIDE=OFF -DIRIS_BUILD_PYTHON=OFF", test: false }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: This change
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: change
+          persist-credentials: false
+      - name: The base (control)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: base
+          ref: ${{ github.event.pull_request.base.sha || github.event.before || 'main' }}
+          persist-credentials: false
+      - name: The consumer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: IrisDigitalPathology/${{ matrix.consumer }}
+          path: consumer
+          persist-credentials: false
+      - name: Build against the change, then the base
+        env:
+          OPTIONS: ${{ matrix.options }}
+          RUN_TESTS: ${{ matrix.test }}
+        run: |
+          # Clang everywhere (Iris-Core D38): clang-cl through Visual Studio's
+          # ClangCL toolset on Windows.
+          generator=(-G Ninja -DCMAKE_CXX_COMPILER=clang++)
+          if [[ "$RUNNER_OS" == "Windows" ]]; then generator=(-G "Visual Studio 17 2022" -T ClangCL); fi
+          build() {
+            local headers="$1" out="$2"
+            # shellcheck disable=SC2086  # OPTIONS is a list of -D flags from the matrix
+            cmake -S consumer -B "$out" "${generator[@]}" -DCMAKE_BUILD_TYPE=Release \
+              -DFETCHCONTENT_SOURCE_DIR_IRISHEADERS="$PWD/$headers" $OPTIONS || return 1
+            cmake --build "$out" --config Release --parallel || return 1
+            if [[ "$RUN_TESTS" == "true" ]]; then
+              ctest --test-dir "$out" -C Release --output-on-failure || return 1
+            fi
+          }
+          if build change build-change; then
+            echo "change: green"; exit 0
+          fi
+          echo "change: red"
+          if build base build-base; then
+            echo "::error::This change breaks the consumer: it builds against the base and fails against the change."
+            exit 1
+          fi
+          echo "::warning::The consumer fails against the base too: already broken, not blocked by this change."
