@@ -41,7 +41,7 @@ jobs:
         id: token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ vars.DOWNSTREAM_APP_ID }}
+          client-id: ${{ vars.DOWNSTREAM_APP_CLIENT_ID }}
           private-key: ${{ secrets.DOWNSTREAM_APP_PRIVATE_KEY }}
           owner: IrisDigitalPathology
           repositories: Iris-File-Extension,Iris-Codec
