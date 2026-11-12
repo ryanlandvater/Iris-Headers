@@ -8,6 +8,14 @@
 #ifndef IrisAsync_h
 #define IrisAsync_h
 
+// Self-contained: compiles with no other header first (StandaloneHeaderBuild_1.1).
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <thread>
+#include <IrisTypes.hpp>
+#include <IrisQueue.hpp>
+
 #ifndef IRIS_CONCURRENCY
 #define IRIS_CONCURRENCY std::thread::hardware_concurrency()
 #endif

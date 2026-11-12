@@ -12,6 +12,10 @@
 #ifndef IrisSIMD_hpp
 #define IrisSIMD_hpp
 
+// Self-contained: compiles with no other header first (StandaloneHeaderBuild_1.1).
+#include <cstdint>
+#include <IrisTypes.hpp>
+
 namespace Iris {
 namespace SIMD {
 /**
