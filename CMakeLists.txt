@@ -38,6 +38,33 @@ if (IRIS_HEADERS_CHECK_STANDALONE)
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/standalone_headers.cmake)
 endif()
 
+# TypeTests_1.3: the shared types' behaviour, with Catch2 at the version and
+# hash Iris-Core pins. Separate from IRIS_HEADERS_BUILD_TESTS, which needs
+# Highway for the SIMD kernels; the two options merge when those kernels move
+# to Iris-Codec (Narrow_3, PinsAndSimdMoved_3.3).
+option(IRIS_HEADERS_BUILD_TYPE_TESTS "Build the shared types' Catch2 tests" OFF)
+if (IRIS_HEADERS_BUILD_TYPE_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(Catch2
+        URL      https://github.com/catchorg/Catch2/archive/refs/tags/v3.15.1.tar.gz
+        URL_HASH SHA256=be23a52b85cf04cd9587612147a10b023d59ed9757fa1843cc99e615d6c0893c
+        SYSTEM
+        EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(Catch2)
+    list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
+    include(Catch)
+    enable_testing()
+    add_executable(IrisTypesTests
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/types_test.cpp
+        ${IRIS_SOURCE_DIR}/IrisBuffer.cpp
+        ${IRIS_SOURCE_DIR}/IrisAsync.cpp
+        ${IRIS_SOURCE_DIR}/IrisMemory.cpp)
+    target_include_directories(IrisTypesTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/priv)
+    target_compile_definitions(IrisTypesTests PRIVATE IRIS_EXPORT_API=true)
+    target_link_libraries(IrisTypesTests PRIVATE IrisHeaders Catch2::Catch2WithMain)
+    catch_discover_tests(IrisTypesTests)
+endif()
+
 option(IRIS_HEADERS_BUILD_TESTS "Build the Iris-Headers source tests (requires Google Highway)" OFF)
 if (IRIS_HEADERS_BUILD_TESTS)
     enable_testing()
