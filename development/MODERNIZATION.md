@@ -1,7 +1,7 @@
 # Iris-Headers modernization plan
 
-**Status:** proposed 2026-11-12, for Ryan's decisions (§4). Nothing below is
-built yet. **Owner:** Ryan.
+**Status:** decisions answered 2026-11-12 (§4); the plan is ready to build.
+Nothing below is built yet; its diagrams await a render (mermaid-cli). **Owner:** Ryan.
 
 Ryan, 2026-11-12: "Any changes that are needed to the upstream Iris-Headers are
 allowed. We are migrating this project to as modern a design architecture as we
@@ -118,7 +118,7 @@ classDiagram
     StrongIndex <|-- PlaneIndex : Tag = Plane
 ```
 
-- **`Result`** (proposed; §4 HQ3): a scoped `Severity` replaces the bit field;
+- **`Result`** (ResultShapeQuestion_3, answered): a scoped `Severity` replaces the bit field;
   `Domain` says which project's code it is, and `code` is that project's own
   error enumeration, so Iris-Core keeps its error families (its ARCHITECTURE
   §6) and the codec keeps its own without this repository knowing either;
@@ -147,16 +147,16 @@ classDiagram
 
 ## 4. Decisions for Ryan
 
-Each has a proposal; "keep" locks it. Answers are recorded here, dated.
+Each question has a proposal and Ryan's dated answer.
 
 | Q | Question | Proposal |
 |---|---|---|
-| HQ1 | Narrow Iris-Headers to the shared vocabulary (§3), moving the viewer API to Iris-Core and the codec API, GPU context, SIMD kernels and dependency pins to Iris-Codec? | **Yes.** It is the common language you described, and nothing more, so a change to one project's API never releases the others' vocabulary |
-| HQ2 | Which repository is canonical, and how are releases made? | `IrisDigitalPathology/Iris-Headers` is canonical; `ryanlandvater/Iris-Headers` stays the development fork that IFE's fork-mirroring fetches; releases are signed SemVer tags on the canonical repository, and Iris-Core pins a tag and its hash, never a fork's commit. The transfer to Aptix's organization follows Iris-Core Q21 |
-| HQ3 | `Result`'s new shape: `Severity` + `Domain` + project code + message + `source_location` (§3)? | **Yes**, with `succeeded()` / `failed()` instead of a `bool` conversion. Alternative: keep the bit field and add the fields, which keeps old call sites compiling but keeps the ambiguity of a warning converting to `true` |
-| HQ4 | One breaking release (2.0.0) with every consumer moved in step, or a release that deprecates first and removes in the next? | **One breaking release**, because every consumer is yours and the downstream CI (SafetyNet_1) proves each one builds before the tag; deprecation shims would be code that exists only to be deleted |
-| HQ5 | Strong indices for `LayerIndex`, `TileIndex`, `ImageIndex`, plus `PlaneIndex` (Z-stacks)? | **Yes**, one template; the IFE generator emits them where the wire carries an index |
-| HQ6 | Does `MemoryArena` (from FastFHIR) stay here? | **Yes**: IFE and Iris-Codec both need it, and IFE cannot depend on the codec (the topology in `NOTES_FROM_IFE.md` §7) |
+| VocabularyScopeQuestion_1 | Narrow Iris-Headers to the shared vocabulary (§3), moving the viewer API to Iris-Core and the codec API, GPU context, SIMD kernels and dependency pins to Iris-Codec? | **Answered 2026-11-12 (Ryan): narrow it**, as proposed. Only the common language stays, so a change to one project's API never releases the others' vocabulary |
+| CanonicalHomeQuestion_2 | Which repository is canonical, and how are releases made? | Proposed: the IrisDigitalPathology repository canonical, transfer to Aptix later. **Answered 2026-11-12 (Ryan): move to Aptix now**, before the first tag, and keep it **public under MIT** (follow-up, same day), so IFE, Iris-Codec and community users fetch it without credentials and nothing proprietary enters it (Iris-Core D20). `Aptix-Bio/Iris-Headers` becomes canonical; `ryanlandvater/Iris-Headers` stays the development fork that IFE's fork-mirroring fetches; releases are signed SemVer tags on `Aptix-Bio/Iris-Headers`, and Iris-Core pins a tag and its hash. A transfer redirects the old URL for links, `git clone`, `fetch` and `push`, until a repository is created at the old location, which deletes the redirect ([GitHub, transferring a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/transferring-a-repository), read 2026-11-12); so nothing is ever created at `IrisDigitalPathology/Iris-Headers` again, and consumers move to the new URL in their next pull request |
+| ResultShapeQuestion_3 | `Result`'s new shape: `Severity` + `Domain` + project code + message + `source_location` (§3)? | **Answered 2026-11-12 (Ryan): as proposed**, with `succeeded()` / `failed()` and no conversion to `bool`, `[[nodiscard]]`, every member `noexcept` |
+| BreakingReleaseQuestion_4 | One breaking release (2.0.0) with every consumer moved in step, or a release that deprecates first and removes in the next? | **Answered 2026-11-12 (Ryan): one breaking release**, as proposed; the downstream build (SafetyNet_1) proves each consumer before the tag, and no deprecation shim is written |
+| StrongIndicesQuestion_5 | Strong indices for `LayerIndex`, `TileIndex`, `ImageIndex`, plus `PlaneIndex` (Z-stacks)? | **Answered 2026-11-12 (Ryan): strong indices**, one `StrongIndex<Tag>` template, as proposed; IFE's generator emits them |
+| MemoryArenaQuestion_6 | Does `MemoryArena` (from FastFHIR) stay here? | **Answered 2026-11-12 (Ryan): it stays**, in the `iris_headers_runtime` library with Buffer, Queue and Async, since IFE and Iris-Codec both need it and IFE cannot depend on the codec |
 
 ## 5. Work breakdown
 
@@ -172,19 +172,20 @@ building.
 
 ### Release_2 — a version consumers can pin
 
-- [ ] **ForksReconciled_2.1** — the fork's 7 commits (`2f6e777` … `0ba637d`) merged into the canonical repository by pull request (HQ2)
-- [ ] **FirstTag_2.2** — `v1.0.0`, signed, on the canonical repository, matching `MODULE.bazel`'s version; Iris-Core's pin moved from `0ba637d` to it (Iris-Core IrisHeadersRelease_0.4.9)
+- [ ] **ForksReconciled_2.1** — the fork's 7 commits (`2f6e777` … `0ba637d`) merged into `IrisDigitalPathology/Iris-Headers` by pull request, so the transfer carries one history
+- [ ] **TransferredToAptix_2.3** — Ryan transfers `IrisDigitalPathology/Iris-Headers` to `Aptix-Bio`, public, MIT unchanged (CanonicalHomeQuestion_2); the old URL redirects; IFE's fork-mirroring and Iris-Codec's `cmake/iris-repositories.cmake` name `Aptix-Bio` as the canonical owner; nothing is created at the old location
+- [ ] **FirstTag_2.2** — `v1.0.0`, signed, on `Aptix-Bio/Iris-Headers` after TransferredToAptix_2.3, matching `MODULE.bazel`'s version; Iris-Core's pin moved from `0ba637d` to it (Iris-Core IrisHeadersRelease_0.4.9)
 
-### Narrow_3 — only the vocabulary stays (HQ1)
+### Narrow_3 — only the vocabulary stays (VocabularyScopeQuestion_1)
 
 - [ ] **ViewerApiRemoved_3.1** — `IrisCore.hpp`'s viewer functions, info structs and `Viewer` / `Slide` handles deleted; Iris-Core defines its own lifecycle API (its PublicApiComplete_11.1); the Buffer functions move to the runtime library (Modernize_4)
 - [ ] **CodecApiMoved_3.2** — codec handles, `IrisCodecCore.hpp`, the `Iris::Instance` / `Device` / `Queue` aliases, `priv/IrisCoreVulkan.hpp` moved to Iris-Codec under `IrisCodec::`; a consumer test includes Iris-Core's RIG header and the codec's headers in one translation unit
 - [ ] **PinsAndSimdMoved_3.3** — `cmake/dependencies.cmake`, `IrisSIMD` and its tests moved to Iris-Codec; IFE's and the codec's builds updated in the same step
 - [ ] **PythonGlueMoved_3.4** — `priv/IrisCorePython.hpp` moved to whichever binding uses it, or deleted if none does
 
-### Modernize_4 — the types the family's style guide asks for (HQ3, HQ5)
+### Modernize_4 — the types the family's style guide asks for (ResultShapeQuestion_3, StrongIndicesQuestion_5)
 
-- [ ] **ResultRedesigned_4.1** — `Severity`, `Domain`, code, message, `source_location`; tests red first; every consumer moved (HQ4)
+- [ ] **ResultRedesigned_4.1** — `Severity`, `Domain`, code, message, `source_location`; tests red first; every consumer moved (BreakingReleaseQuestion_4)
 - [ ] **StrongIndices_4.2** — `StrongIndex<Tag>`; IFE's generator emits it
 - [ ] **ScopedEnumerations_4.3** — every enumeration scoped; values named from IFE's constants
 - [ ] **ExportMacro_4.4** — three-state `IRIS_EXPORT` (`NOTES_FROM_IFE.md` §5); IFE's `IRIS_EXPORT=` workaround deleted
@@ -215,5 +216,6 @@ flowchart LR
 
 Iris-Core's ErrorFamilies_1.4 builds its error families on `Result`. It can
 start against today's `Result` and move with ResultRedesigned_4.1, or wait for
-it; the proposal is to settle HQ3 first and build ErrorFamilies_1.4 on the
-new shape directly, since the shape decides its conversion code.
+it. With ResultShapeQuestion_3 answered, ErrorFamilies_1.4 is built on the
+new shape directly, once ResultRedesigned_4.1 lands, since the shape decides
+its conversion code.
