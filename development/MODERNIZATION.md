@@ -1,7 +1,7 @@
 # Iris-Headers modernization plan
 
 **Status:** decisions answered 2026-11-12 (§4); the plan is ready to build.
-Nothing below is built yet; its diagrams await a render (mermaid-cli). **Owner:** Ryan.
+Its three diagrams render with mermaid-cli 12.2.0 (2026-11-12). **Owner:** Ryan.
 
 Ryan, 2026-11-12: "Any changes that are needed to the upstream Iris-Headers are
 allowed. We are migrating this project to as modern a design architecture as we
