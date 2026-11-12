@@ -8,6 +8,17 @@
 #ifndef IrisQueueV2_h
 #define IrisQueueV2_h
 
+// Self-contained: compiles with no other header first (StandaloneHeaderBuild_1.1).
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <type_traits>
+#include <IrisTypes.hpp>
+
 namespace Iris {
 namespace FIFO2 {
 #if IRIS_DEBUG

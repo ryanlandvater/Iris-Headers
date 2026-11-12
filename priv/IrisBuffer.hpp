@@ -13,6 +13,10 @@
 #ifndef IrisBuffer_hpp
 #define IrisBuffer_hpp
 
+// Self-contained: compiles with no other header first (StandaloneHeaderBuild_1.1).
+#include <cstddef>
+#include <IrisTypes.hpp>
+
 //TODO: THIS IS CURRENTLY NOT THREAD SAFE! THERE CAN BE DATA RACES WITH THE CURRENT FORM. MUST UPDATE TO USE ATOMIC AND MUTEXES FOR THREAD SAFETY!
 
 namespace Iris {

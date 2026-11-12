@@ -33,6 +33,11 @@ if(NOT ${PROJECT_IS_TOP_LEVEL})
     
 endif(NOT ${PROJECT_IS_TOP_LEVEL})
 
+option(IRIS_HEADERS_CHECK_STANDALONE "Compile every header alone and all together" ${PROJECT_IS_TOP_LEVEL})
+if (IRIS_HEADERS_CHECK_STANDALONE)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/standalone_headers.cmake)
+endif()
+
 option(IRIS_HEADERS_BUILD_TESTS "Build the Iris-Headers source tests (requires Google Highway)" OFF)
 if (IRIS_HEADERS_BUILD_TESTS)
     enable_testing()
